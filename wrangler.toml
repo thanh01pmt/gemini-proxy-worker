@@ -17,9 +17,10 @@ binding = "DB"
 database_name = "gemini-key-monitor"
 database_id = "4ac01df4-824f-4e15-8ad1-f0b6189d1472"
 
+
 [vars]
 GEMINI_KEY_COUNT = "10"
-ALLOWED_ORIGIN   = "https://gemini-proxy-worker.pages.dev"
+ALLOWED_ORIGIN   = "https://gemini-proxy.makexyzfun.workers.dev"
 TELEGRAM_CHAT_ID = "8944910772"
 
 # Secrets — set qua CLI, không lưu ở đây:

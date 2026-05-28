@@ -5,6 +5,7 @@
 
 import { sendTelegram, formatDailyReport, formatAlert } from "./telegram.js";
 import { saveDailyReport, saveAlert, getRecentReports, getRecentAlerts } from "./db.js";
+import { getDashboardHtml } from "./dashboard.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -332,6 +333,17 @@ async function handleScheduled(env) {
 
 // ─── HTTP Handlers ────────────────────────────────────────────────────────────
 
+async function handleDashboardHtml(cors) {
+  const html = getDashboardHtml();
+  return new Response(html, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+    },
+  });
+}
+
 async function handleStatus(env, keyCount, cors) {
   const summary = await buildPoolSummary(env, keyCount);
   return new Response(JSON.stringify(summary, null, 2), {
@@ -466,6 +478,11 @@ export default {
 
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: cors });
+    }
+
+    // Serves the simple web dashboard
+    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/dashboard")) {
+      return handleDashboardHtml(cors);
     }
 
     // Optional auth
