@@ -1,0 +1,30 @@
+name = "gemini-proxy"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# Cron: 23:00 UTC = 06:00 sáng Vietnam (UTC+7)
+[triggers]
+crons = ["0 23 * * *"]
+
+# KV: lưu key states + alert dedup
+[[kv_namespaces]]
+binding = "KEY_STATE"
+id = "YOUR_KV_NAMESPACE_ID"
+
+# D1: lưu daily reports + alert history
+[[d1_databases]]
+binding = "DB"
+database_name = "gemini-key-monitor"
+database_id = "YOUR_D1_DATABASE_ID"
+
+[vars]
+GEMINI_KEY_COUNT = "3"
+ALLOWED_ORIGIN   = "https://your-app.pages.dev"
+TELEGRAM_CHAT_ID = "8944910772"
+
+# Secrets — set qua CLI, không lưu ở đây:
+# wrangler secret put GEMINI_KEY_1
+# wrangler secret put GEMINI_KEY_2
+# wrangler secret put GEMINI_KEY_3
+# wrangler secret put TELEGRAM_BOT_TOKEN
+# wrangler secret put PROXY_SECRET
