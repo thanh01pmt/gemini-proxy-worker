@@ -21,3 +21,5 @@ Thumbs.db
 
 # Secrets
 .secret
+.env
+.env.*
