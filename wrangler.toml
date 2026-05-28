@@ -15,7 +15,7 @@ id = "YOUR_KV_NAMESPACE_ID"
 [[d1_databases]]
 binding = "DB"
 database_name = "gemini-key-monitor"
-database_id = "YOUR_D1_DATABASE_ID"
+database_id = "4ac01df4-824f-4e15-8ad1-f0b6189d1472"
 
 [vars]
 GEMINI_KEY_COUNT = "3"
