@@ -212,7 +212,7 @@ function corsHeaders(origin, env) {
   return {
     "Access-Control-Allow-Origin": ok ? (origin || "*") : "",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-Proxy-Secret",
+    "Access-Control-Allow-Headers": "Content-Type, X-Proxy-Secret, x-goog-api-key, Authorization",
     "Access-Control-Max-Age": "86400",
   };
 }
@@ -827,8 +827,13 @@ export default {
 
     // Optional auth
     if (env.PROXY_SECRET) {
-      const secret = request.headers.get("X-Proxy-Secret");
-      if (secret !== env.PROXY_SECRET) {
+      const secret = request.headers.get("X-Proxy-Secret") || request.headers.get("x-goog-api-key") || url.searchParams.get("key");
+      let authHeader = request.headers.get("Authorization") || "";
+      if (authHeader.startsWith("Bearer ")) {
+        authHeader = authHeader.slice(7);
+      }
+      const isAuthenticated = (secret === env.PROXY_SECRET) || (authHeader === env.PROXY_SECRET);
+      if (!isAuthenticated) {
         return new Response(JSON.stringify({ error: "Unauthorized" }), {
           status: 401, headers: { ...cors, "Content-Type": "application/json" },
         });
