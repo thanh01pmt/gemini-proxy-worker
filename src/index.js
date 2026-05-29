@@ -11,8 +11,11 @@ import { getDashboardHtml } from "./dashboard.js";
 
 const BACKOFF_SCHEDULE    = [30, 60, 120, 300, 3600];
 const CIRCUIT_BREAKER_THRESHOLD = 5;
-const DAILY_QUOTA_SOFT   = 1400;
-const DAILY_QUOTA_HARD   = 1480;
+
+// Daily quota per key — dựa trên free tier thực tế (worst-case ~250 RPD cho flash)
+// Soft: cảnh báo sớm, Hard: ngắt key
+const DAILY_QUOTA_SOFT   = 200;
+const DAILY_QUOTA_HARD   = 240;
 
 // Alert dedup TTL (giây) — không gửi cùng 1 loại alert trong khoảng này
 const ALERT_COOLDOWN = {
@@ -20,6 +23,188 @@ const ALERT_COOLDOWN = {
   circuit_breaker: 3600,  // 1 giờ per key
   pool_critical:    900,  // 15 phút
 };
+
+// ─── Gemini Model Catalog (Free Tier — cập nhật 05/2026) ─────────────────────
+
+const GEMINI_MODELS = [
+  // ── 🌟 Featured / Latest Generation (Stable) ──
+  {
+    id: "gemini-3.5-flash",
+    name: "Gemini 3.5 Flash",
+    tier: "free",
+    status: "stable",
+    rpm: 15, rpd: 1500, tpm: 1_000_000,
+    context_window: 1_048_576,
+    note: "Latest flagship Flash model (Released May 2026). 4x faster than other frontier models with massive reasoning leap.",
+  },
+  {
+    id: "gemini-3.1-flash-lite",
+    name: "Gemini 3.1 Flash Lite",
+    tier: "free",
+    status: "stable",
+    rpm: 15, rpd: 1500, tpm: 1_000_000,
+    context_window: 1_048_576,
+    note: "Generally Available (GA) as of May 2026. Highly optimized for speed, massive scale, and low cost.",
+  },
+
+  // ── 🛠️ Premium Reasoning & Stable Production ──
+  {
+    id: "gemini-2.5-flash",
+    name: "Gemini 2.5 Flash",
+    tier: "free",
+    status: "stable",
+    rpm: 10, rpd: 250, tpm: 250_000,
+    context_window: 1_048_576,
+    note: "Stable 2.5 generation daily driver. Supported until October 2026.",
+  },
+  {
+    id: "gemini-2.5-flash-lite",
+    name: "Gemini 2.5 Flash Lite",
+    tier: "free",
+    status: "stable",
+    rpm: 15, rpd: 1000, tpm: 250_000,
+    context_window: 1_048_576,
+    note: "Stable cost-efficient model. Highly generous RPD on 2.5 generation.",
+  },
+  {
+    id: "gemini-2.5-pro",
+    name: "Gemini 2.5 Pro",
+    tier: "free",
+    status: "stable",
+    rpm: 5, rpd: 100, tpm: 250_000,
+    context_window: 1_048_576,
+    note: "Premium reasoning stable workhorse for deep analysis. Low limits on free tier.",
+  },
+
+  // ── 🧪 Frontier Preview & Multimodal Specialized ──
+  {
+    id: "gemini-3.1-pro-preview",
+    name: "Gemini 3.1 Pro (Preview)",
+    tier: "free",
+    status: "preview",
+    rpm: 5, rpd: 100, tpm: 250_000,
+    context_window: 1_048_576,
+    note: "Google's most powerful reasoning model. Built for advanced coding agents and complex multi-step tasks.",
+  },
+  {
+    id: "gemini-3.1-flash-live-preview",
+    name: "Gemini 3.1 Flash Live (Preview)",
+    tier: "free",
+    status: "preview",
+    rpm: 15, rpd: 1500, tpm: 1_000_000,
+    context_window: 131_072,
+    note: "Live API optimized for low-latency, real-time streaming audio-to-audio conversation.",
+  },
+  {
+    id: "gemini-3-flash-preview",
+    name: "Gemini 3 Flash (Preview)",
+    tier: "free",
+    status: "preview",
+    rpm: 15, rpd: 1500, tpm: 1_000_000,
+    context_window: 1_048_576,
+    note: "Frontier performance at flash pricing. Free tier input/output preview snapshot.",
+  },
+  {
+    id: "gemini-3.1-flash-image",
+    name: "Gemini 3.1 Flash Image",
+    tier: "free",
+    status: "stable",
+    rpm: 10, rpd: 500, tpm: null,
+    context_window: null,
+    note: "Optimized for pro-level generation and search-grounded image accuracy at Flash speed.",
+  },
+
+  // ── 🔄 Aliases (Dynamic routing to latest stable) ──
+  {
+    id: "gemini-flash-latest",
+    name: "Gemini Flash (Latest Alias)",
+    tier: "free",
+    status: "alias",
+    rpm: null, rpd: null, tpm: null,
+    context_window: null,
+    note: "Alias — resolves to the latest stable Flash model (currently gemini-3.5-flash).",
+  },
+  {
+    id: "gemini-flash-lite-latest",
+    name: "Gemini Flash Lite (Latest Alias)",
+    tier: "free",
+    status: "alias",
+    rpm: null, rpd: null, tpm: null,
+    context_window: null,
+    note: "Alias — resolves to the latest stable Flash Lite model (currently gemini-3.1-flash-lite).",
+  },
+
+  // ── 🧠 Gemma Family (Open Source Weights — Generous Free Tier) ──
+  {
+    id: "gemma-4-31b-it",
+    name: "Gemma 4 31B IT",
+    tier: "free",
+    status: "stable",
+    rpm: 16, rpd: 1500, tpm: null,
+    context_window: 262_144,
+    note: "State-of-the-art open weights model. Excellent for local deployment, advanced reasoning, and coding.",
+  },
+  {
+    id: "gemma-4-26b-a4b-it",
+    name: "Gemma 4 26B A4B IT",
+    tier: "free",
+    status: "stable",
+    rpm: 16, rpd: 1500, tpm: null,
+    context_window: 262_144,
+    note: "Architectural variant of Gemma 4 optimized for specific reasoning pipelines.",
+  },
+  {
+    id: "gemma-3-27b",
+    name: "Gemma 3 27B",
+    tier: "free",
+    status: "stable",
+    rpm: 30, rpd: 14_400, tpm: null,
+    context_window: 32_768,
+    note: "Strongest Gemma 3 variant with massive 14,400 daily requests allocation.",
+  },
+  {
+    id: "gemma-3-12b",
+    name: "Gemma 3 12B",
+    tier: "free",
+    status: "stable",
+    rpm: 30, rpd: 14_400, tpm: null,
+    context_window: 32_768,
+    note: "Perfect sweet spot between low-resource execution and conversational intelligence.",
+  },
+
+  // ── 🗺️ Embedding & Vector Matrix ──
+  {
+    id: "gemini-embedding-001",
+    name: "Gemini Embedding 001",
+    tier: "free",
+    status: "stable",
+    rpm: 5, rpd: 100, tpm: null,
+    context_window: 2048,
+    note: "Production stable retrieval model for semantic search and RAG mapping.",
+  },
+  {
+    id: "gemini-embedding-2-preview",
+    name: "Gemini Embedding 2 (Preview)",
+    tier: "free",
+    status: "preview",
+    rpm: 10, rpd: 500, tpm: null,
+    context_window: null,
+    note: "Next-gen multimodal embedding engine. Maps text, images, video, audio, and PDFs into a unified space.",
+  }
+];
+
+// Paid-only models (liệt kê để client biết mà tránh)
+const PAID_ONLY_MODELS = [
+  "gemini-3.1-pro-preview",
+  "gemini-3-pro-image-preview",
+  "gemini-2.5-flash-image",
+  "gemini-2.5-flash-image-preview",
+  "gemini-3.1-flash-image",
+  "imagen-3",
+  "imagen-4",
+  "veo-2",
+  "veo-3.1",
+];
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 
@@ -390,6 +575,34 @@ async function handleStatus(env, keyCount, cors) {
   });
 }
 
+function handleModels(cors) {
+  const now = new Date().toISOString().slice(0, 10);
+  const payload = {
+    updated: "2026-05-29",
+    note: "Free tier limits per project (not per key). Quota resets at midnight Pacific Time.",
+    free_models: GEMINI_MODELS.map(m => {
+      const isExpired = m.deprecated_date && m.deprecated_date <= now;
+      return {
+        ...m,
+        available: !isExpired,
+        proxy_path: m.id.startsWith("gemini-embedding")
+          ? `/proxy/v1beta/models/${m.id}:embedContent`
+          : `/proxy/v1beta/models/${m.id}:generateContent`,
+      };
+    }),
+    paid_only: PAID_ONLY_MODELS,
+    proxy_daily_quota: {
+      soft_limit: DAILY_QUOTA_SOFT,
+      hard_limit: DAILY_QUOTA_HARD,
+      note: "Per-key aggregate across all models. Key paused when reaching hard limit.",
+    },
+  };
+  return new Response(JSON.stringify(payload, null, 2), {
+    status: 200,
+    headers: { ...cors, "Content-Type": "application/json" },
+  });
+}
+
 async function handleHistory(env, cors) {
   const [reports, alerts] = await Promise.all([
     getRecentReports(env.DB, 7),
@@ -556,6 +769,11 @@ export default {
     // GET /proxy/history
     if (request.method === "GET" && path === "/proxy/history") {
       return handleHistory(env, cors);
+    }
+
+    // GET /proxy/models — catalog of available Gemini models + rate limits
+    if (request.method === "GET" && path === "/proxy/models") {
+      return handleModels(cors);
     }
 
     // POST /proxy/admin/reset-key/:n
