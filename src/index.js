@@ -130,12 +130,34 @@ async function dispatchAlert(env, type, data) {
 
 // ─── Key Pool ─────────────────────────────────────────────────────────────────
 
+/**
+ * Pure check — trả về true/false mà KHÔNG mutate state.
+ * Dùng cho counting, summary, v.v.
+ */
+function isKeyAvailableCheck(state) {
+  const now = Date.now();
+  if (state.status === "dead") {
+    if (now >= state.cooldown_until && state.cooldown_until > 0) {
+      return true; // sẽ recover — nhưng không mutate ở đây
+    }
+    return false;
+  }
+  if (state.status === "cooling" && now < state.cooldown_until) return false;
+  if (state.requests_today >= DAILY_QUOTA_HARD) return false;
+  return true;
+}
+
+/**
+ * Check + mutate: recover key nếu hết cooldown.
+ * Chỉ dùng trong selectKeys (nơi state sau đó được persist qua handleSuccess/handleRateLimit/handleError).
+ */
 function isKeyAvailable(state) {
   const now = Date.now();
   if (state.status === "dead") {
-    // Auto-recover sau cooldown
     if (now >= state.cooldown_until && state.cooldown_until > 0) {
       state.status = "active";
+      state.consecutive_failures = 0;
+      state.backoff_level = 0;
     } else {
       return false;
     }
@@ -221,12 +243,12 @@ async function handleError(env, index, state, keyCount) {
     state.cooldown_until = Date.now() + 3600 * 1000;
     await setKeyState(env.KEY_STATE, index, state);
 
-    // Đếm keys còn available sau khi key này dead
+    // Đếm keys còn available sau khi key này dead (dùng pure check, không mutate)
     const remaining = [];
     for (let i = 0; i < keyCount; i++) {
       if (i === index) continue;
       const s = await getKeyState(env.KEY_STATE, i);
-      if (isKeyAvailable(s)) remaining.push(i);
+      if (isKeyAvailableCheck(s)) remaining.push(i);
     }
 
     // Alert: circuit breaker
@@ -236,6 +258,14 @@ async function handleError(env, index, state, keyCount) {
       availableCount: remaining.length,
       totalCount: keyCount,
     });
+
+    // Alert: all_keys_down nếu không còn key nào
+    if (remaining.length === 0) {
+      await dispatchAlert(env, "all_keys_down", {
+        keyCount,
+        soonestRecoverySec: 3600,
+      });
+    }
 
     // Alert: pool critical nếu chỉ còn 1
     if (remaining.length === 1) {
@@ -261,12 +291,20 @@ async function handleError(env, index, state, keyCount) {
 async function proxyToGemini(request, apiKey) {
   const url = new URL(request.url);
   const targetPath = url.pathname.replace(/^\/proxy/, "");
-  const targetUrl = `https://generativelanguage.googleapis.com${targetPath}?key=${apiKey}`;
+
+  // Xây target URL: giữ nguyên query params gốc từ client (ví dụ ?alt=sse cho streaming)
+  const targetUrl = new URL(`https://generativelanguage.googleapis.com${targetPath}`);
+  for (const [k, v] of url.searchParams) {
+    if (k !== "key") {           // không cho client override key
+      targetUrl.searchParams.set(k, v);
+    }
+  }
+  targetUrl.searchParams.set("key", apiKey);
 
   const headers = new Headers();
-  headers.set("Content-Type", "application/json");
+  headers.set("Content-Type", request.headers.get("Content-Type") || "application/json");
 
-  return fetch(new Request(targetUrl, {
+  return fetch(new Request(targetUrl.toString(), {
     method: request.method,
     headers,
     body: request.method !== "GET" ? await request.text() : undefined,
@@ -283,7 +321,7 @@ async function buildPoolSummary(env, keyCount) {
 
   for (let i = 0; i < keyCount; i++) {
     const state = await getKeyState(env.KEY_STATE, i);
-    const available = isKeyAvailable({ ...state });
+    const available = isKeyAvailableCheck(state);
     if (available) availableCount++;
     totalRequests += state.requests_today;
 
@@ -414,8 +452,21 @@ async function handleProxy(request, env, keyCount, cors) {
     });
   }
 
-  // Thử từng key
+  // Thử từng key (giới hạn tối đa 3 keys mỗi request và delay 1s giữa các lần thử để tránh loop dồn dập)
+  let attempts = 0;
+  const maxAttempts = Math.min(3, keys.length);
+
   for (const { index, state } of keys) {
+    if (attempts >= maxAttempts) {
+      break;
+    }
+    attempts++;
+
+    // Trì hoãn 1 giây trước khi thử key tiếp theo
+    if (attempts > 1) {
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
     const apiKey = env[`GEMINI_KEY_${index + 1}`];
     if (!apiKey) continue;
 
