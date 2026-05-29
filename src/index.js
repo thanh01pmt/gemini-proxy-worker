@@ -195,11 +195,9 @@ const GEMINI_MODELS = [
 
 // Paid-only models (liệt kê để client biết mà tránh)
 const PAID_ONLY_MODELS = [
-  "gemini-3.1-pro-preview",
   "gemini-3-pro-image-preview",
   "gemini-2.5-flash-image",
   "gemini-2.5-flash-image-preview",
-  "gemini-3.1-flash-image",
   "imagen-3",
   "imagen-4",
   "veo-2",
@@ -233,6 +231,7 @@ function defaultKeyState() {
     total_success: 0,
     total_rate_limited: 0,
     total_errors: 0,
+    model_states: {}, // modelId -> { status, cooldown_until, backoff_level }
   };
 }
 
@@ -246,6 +245,9 @@ async function getKeyState(kv, index) {
     const raw = await kv.get(`key_state:${index}`);
     if (!raw) return defaultKeyState();
     const state = { ...defaultKeyState(), ...JSON.parse(raw) };
+    if (!state.model_states) {
+      state.model_states = {};
+    }
     // Reset daily counter nếu sang ngày mới (VN time)
     const today = todayVN();
     if (state.stats_date !== today) {
@@ -319,7 +321,11 @@ async function dispatchAlert(env, type, data) {
  * Pure check — trả về true/false mà KHÔNG mutate state.
  * Dùng cho counting, summary, v.v.
  */
-function isKeyAvailableCheck(state) {
+/**
+ * Pure check — trả về true/false mà KHÔNG mutate state.
+ * Dùng cho counting, summary, v.v.
+ */
+function isKeyAvailableCheck(state, modelId) {
   const now = Date.now();
   if (state.status === "dead") {
     if (now >= state.cooldown_until && state.cooldown_until > 0) {
@@ -329,6 +335,13 @@ function isKeyAvailableCheck(state) {
   }
   if (state.status === "cooling" && now < state.cooldown_until) return false;
   if (state.requests_today >= DAILY_QUOTA_HARD) return false;
+
+  if (modelId && state.model_states && state.model_states[modelId]) {
+    const ms = state.model_states[modelId];
+    if (ms.status === "cooling" && now < ms.cooldown_until) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -336,13 +349,14 @@ function isKeyAvailableCheck(state) {
  * Check + mutate: recover key nếu hết cooldown.
  * Chỉ dùng trong selectKeys (nơi state sau đó được persist qua handleSuccess/handleRateLimit/handleError).
  */
-function isKeyAvailable(state) {
+function isKeyAvailable(state, modelId) {
   const now = Date.now();
   if (state.status === "dead") {
     if (now >= state.cooldown_until && state.cooldown_until > 0) {
       state.status = "active";
       state.consecutive_failures = 0;
       state.backoff_level = 0;
+      state.model_states = {};
     } else {
       return false;
     }
@@ -350,13 +364,29 @@ function isKeyAvailable(state) {
   if (state.status === "cooling" && now < state.cooldown_until) return false;
   if (state.status === "cooling" && now >= state.cooldown_until) state.status = "active";
   if (state.requests_today >= DAILY_QUOTA_HARD) return false;
+
+  if (modelId && state.model_states && state.model_states[modelId]) {
+    const ms = state.model_states[modelId];
+    if (ms.status === "cooling" && now < ms.cooldown_until) {
+      return false;
+    }
+    if (ms.status === "cooling" && now >= ms.cooldown_until) {
+      ms.status = "active";
+    }
+  }
   return true;
 }
 
-function pressureScore(state) {
+function pressureScore(state, modelId) {
   const quotaRatio  = state.requests_today / DAILY_QUOTA_SOFT;
   const freshBonus  = (Date.now() - state.last_used) > 60000 ? -5 : 0;
-  return quotaRatio * 100 + state.backoff_level * 5 + freshBonus;
+  
+  let modelBackoff = 0;
+  if (modelId && state.model_states && state.model_states[modelId]) {
+    modelBackoff = state.model_states[modelId].backoff_level || 0;
+  }
+  
+  return quotaRatio * 100 + (state.backoff_level + modelBackoff) * 5 + freshBonus;
 }
 
 async function loadAllStates(env, keyCount) {
@@ -368,16 +398,27 @@ async function loadAllStates(env, keyCount) {
   return states;
 }
 
-async function selectKeys(env, keyCount) {
+async function selectKeys(env, keyCount, modelId) {
   const all = await loadAllStates(env, keyCount);
-  const available = all.filter(({ state }) => isKeyAvailable(state));
+  const available = all.filter(({ state }) => isKeyAvailable(state, modelId));
 
   if (available.length === 0) {
-    const cooling = all.filter(s => s.state.status === "cooling" || s.state.status === "dead");
-    const soonestMs = cooling.reduce(
-      (min, s) => Math.min(min, s.state.cooldown_until),
-      Infinity
-    );
+    const cooling = all.filter(s => {
+      if (s.state.status === "cooling" || s.state.status === "dead") return true;
+      if (modelId && s.state.model_states?.[modelId]?.status === "cooling") return true;
+      return false;
+    });
+    
+    const soonestMs = cooling.reduce((min, s) => {
+      let cooldowns = [];
+      if (s.state.cooldown_until > 0) cooldowns.push(s.state.cooldown_until);
+      if (modelId && s.state.model_states?.[modelId]?.cooldown_until > 0) {
+        cooldowns.push(s.state.model_states[modelId].cooldown_until);
+      }
+      if (cooldowns.length === 0) return min;
+      return Math.min(min, ...cooldowns);
+    }, Infinity);
+
     return {
       keys: [],
       all,
@@ -385,35 +426,62 @@ async function selectKeys(env, keyCount) {
     };
   }
 
-  available.sort((a, b) => pressureScore(a.state) - pressureScore(b.state));
+  available.sort((a, b) => pressureScore(a.state, modelId) - pressureScore(b.state, modelId));
   return { keys: available, all, retryAfterMs: 0 };
 }
 
 // ─── State Updaters ───────────────────────────────────────────────────────────
 
-async function handleSuccess(kv, index, state) {
+async function handleSuccess(kv, index, state, modelId) {
   state.status = "active";
   state.consecutive_failures = 0;
   state.backoff_level = Math.max(0, state.backoff_level - 1);
   state.requests_today += 1;
   state.last_used = Date.now();
   state.total_success += 1;
+
+  if (modelId) {
+    if (!state.model_states) state.model_states = {};
+    if (state.model_states[modelId]) {
+      const ms = state.model_states[modelId];
+      ms.status = "active";
+      ms.cooldown_until = 0;
+      ms.backoff_level = Math.max(0, ms.backoff_level - 1);
+    }
+  }
+
   await setKeyState(kv, index, state);
 }
 
-async function handleRateLimit(kv, index, state, retryAfterSec) {
-  const backoffSec = BACKOFF_SCHEDULE[Math.min(state.backoff_level, BACKOFF_SCHEDULE.length - 1)];
+async function handleRateLimit(kv, index, state, retryAfterSec, modelId) {
+  const now = Date.now();
+  const backoffLevel = modelId ? (state.model_states?.[modelId]?.backoff_level || 0) : state.backoff_level;
+  const backoffSec = BACKOFF_SCHEDULE[Math.min(backoffLevel, BACKOFF_SCHEDULE.length - 1)];
   const cooldownSec = Math.max(retryAfterSec || 0, backoffSec);
+  const cooldownUntil = now + cooldownSec * 1000;
 
-  state.status = "cooling";
-  state.cooldown_until = Date.now() + cooldownSec * 1000;
-  state.backoff_level = Math.min(state.backoff_level + 1, BACKOFF_SCHEDULE.length - 1);
+  if (modelId) {
+    if (!state.model_states) state.model_states = {};
+    if (!state.model_states[modelId]) {
+      state.model_states[modelId] = { status: "active", cooldown_until: 0, backoff_level: 0 };
+    }
+    const ms = state.model_states[modelId];
+    ms.status = "cooling";
+    ms.cooldown_until = cooldownUntil;
+    ms.backoff_level = Math.min(backoffLevel + 1, BACKOFF_SCHEDULE.length - 1);
+    console.log(`Key ${index + 1} model ${modelId} cooling ${cooldownSec}s (backoff lv${ms.backoff_level})`);
+  } else {
+    state.status = "cooling";
+    state.cooldown_until = cooldownUntil;
+    state.backoff_level = Math.min(state.backoff_level + 1, BACKOFF_SCHEDULE.length - 1);
+    console.log(`Key ${index + 1} cooling ${cooldownSec}s (backoff lv${state.backoff_level})`);
+  }
+
   state.consecutive_failures = 0;
   state.requests_today += 1;
-  state.last_used = Date.now();
+  state.last_used = now;
   state.total_rate_limited += 1;
 
-  console.log(`Key ${index + 1} cooling ${cooldownSec}s (backoff lv${state.backoff_level})`);
   await setKeyState(kv, index, state);
 }
 
@@ -525,6 +593,7 @@ async function buildPoolSummary(env, keyCount) {
       total_success: state.total_success,
       total_rate_limited: state.total_rate_limited,
       total_errors: state.total_errors,
+      model_states: state.model_states || {},
     });
   }
 
@@ -627,8 +696,15 @@ async function handleAdminReset(env, keyCount, cors, pathname) {
   });
 }
 
+function extractModelId(pathname) {
+  const match = pathname.match(/models\/([^:/]+)/);
+  return match ? match[1] : "default";
+}
+
 async function handleProxy(request, env, keyCount, cors) {
-  const { keys, all, retryAfterMs } = await selectKeys(env, keyCount);
+  const url = new URL(request.url);
+  const modelId = extractModelId(url.pathname);
+  const { keys, all, retryAfterMs } = await selectKeys(env, keyCount, modelId);
 
   // Tất cả keys đều unavailable
   if (keys.length === 0) {
@@ -693,7 +769,7 @@ async function handleProxy(request, env, keyCount, cors) {
     }
 
     if (response.status === 200) {
-      await handleSuccess(env.KEY_STATE, index, state);
+      await handleSuccess(env.KEY_STATE, index, state, modelId);
       const body = await response.arrayBuffer();
       return new Response(body, {
         status: 200,
@@ -707,7 +783,7 @@ async function handleProxy(request, env, keyCount, cors) {
 
     if (response.status === 429 || response.status === 503) {
       const retryAfter = parseInt(response.headers.get("Retry-After") || "0", 10);
-      await handleRateLimit(env.KEY_STATE, index, state, retryAfter);
+      await handleRateLimit(env.KEY_STATE, index, state, retryAfter, modelId);
       continue;
     }
 
