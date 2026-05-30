@@ -4,7 +4,7 @@
  */
 
 import { sendTelegram, formatDailyReport, formatAlert } from "./telegram.js";
-import { saveDailyReport, saveAlert, getRecentReports, getRecentAlerts } from "./db.js";
+import { saveDailyReport, saveAlert, getRecentReports, getRecentAlerts, saveApiCall, getRecentApiCalls } from "./db.js";
 import { getDashboardHtml } from "./dashboard.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -701,7 +701,84 @@ function extractModelId(pathname) {
   return match ? match[1] : "default";
 }
 
-async function handleProxy(request, env, keyCount, cors) {
+async function logApiCallAsync(db, modelId, keyIndex, response) {
+  if (!db) return;
+  try {
+    const clone = response.clone();
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cachedTokens = 0;
+
+    const contentType = clone.headers.get("content-type") || "";
+    if (contentType.includes("text/event-stream")) {
+      const reader = clone.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+      }
+
+      const usageMatches = [...buffer.matchAll(/"usageMetadata"\s*:\s*\{([^}]+)\}/g)];
+      if (usageMatches.length > 0) {
+        const lastUsageContent = usageMatches[usageMatches.length - 1][1];
+        const promptMatch = lastUsageContent.match(/"promptTokenCount"\s*:\s*(\d+)/);
+        const candidatesMatch = lastUsageContent.match(/"candidatesTokenCount"\s*:\s*(\d+)/);
+        const cachedMatch = lastUsageContent.match(/"cachedContentTokenCount"\s*:\s*(\d+)/);
+
+        if (promptMatch) inputTokens = parseInt(promptMatch[1], 10);
+        if (candidatesMatch) outputTokens = parseInt(candidatesMatch[1], 10);
+        if (cachedMatch) cachedTokens = parseInt(cachedMatch[1], 10);
+      }
+    } else {
+      const text = await clone.text();
+      try {
+        const json = JSON.parse(text);
+        if (json.usageMetadata) {
+          inputTokens = json.usageMetadata.promptTokenCount || 0;
+          outputTokens = json.usageMetadata.candidatesTokenCount || 0;
+          cachedTokens = json.usageMetadata.cachedContentTokenCount || 0;
+        }
+      } catch (e) {
+        const promptMatch = text.match(/"promptTokenCount"\s*:\s*(\d+)/);
+        const candidatesMatch = text.match(/"candidatesTokenCount"\s*:\s*(\d+)/);
+        const cachedMatch = text.match(/"cachedContentTokenCount"\s*:\s*(\d+)/);
+        if (promptMatch) inputTokens = parseInt(promptMatch[1], 10);
+        if (candidatesMatch) outputTokens = parseInt(candidatesMatch[1], 10);
+        if (cachedMatch) cachedTokens = parseInt(cachedMatch[1], 10);
+      }
+    }
+
+    if (inputTokens > 0 || outputTokens > 0) {
+      await saveApiCall(db, {
+        modelId,
+        inputTokens,
+        outputTokens,
+        cachedTokens,
+        statusCode: response.status,
+        keyIndex
+      });
+    }
+  } catch (err) {
+    console.error("D1 logApiCallAsync failed:", err.message);
+  }
+}
+
+async function handleApiCalls(request, env, cors) {
+  const url = new URL(request.url);
+  const limit = parseInt(url.searchParams.get("limit") || "100", 10);
+  const startTime = url.searchParams.get("startTime");
+  const endTime = url.searchParams.get("endTime");
+
+  const calls = await getRecentApiCalls(env.DB, { limit, startTime, endTime });
+  return new Response(JSON.stringify({ success: true, calls }, null, 2), {
+    status: 200,
+    headers: { ...cors, "Content-Type": "application/json" },
+  });
+}
+
+async function handleProxy(request, env, keyCount, cors, ctx) {
   const url = new URL(request.url);
   const modelId = extractModelId(url.pathname);
   const { keys, all, retryAfterMs } = await selectKeys(env, keyCount, modelId);
@@ -770,7 +847,15 @@ async function handleProxy(request, env, keyCount, cors) {
 
     if (response.status === 200) {
       await handleSuccess(env.KEY_STATE, index, state, modelId);
+      const responseCloneForLogging = response.clone();
       const body = await response.arrayBuffer();
+
+      if (ctx && ctx.waitUntil) {
+        ctx.waitUntil(logApiCallAsync(env.DB, modelId, index + 1, responseCloneForLogging));
+      } else {
+        logApiCallAsync(env.DB, modelId, index + 1, responseCloneForLogging);
+      }
+
       return new Response(body, {
         status: 200,
         headers: {
@@ -810,7 +895,7 @@ async function handleProxy(request, env, keyCount, cors) {
 
 export default {
   // HTTP requests
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const origin = request.headers.get("Origin") || "";
     const cors = corsHeaders(origin, env);
     const url = new URL(request.url);
@@ -852,6 +937,11 @@ export default {
       return handleHistory(env, cors);
     }
 
+    // GET /proxy/api-calls
+    if (request.method === "GET" && path === "/proxy/api-calls") {
+      return handleApiCalls(request, env, cors);
+    }
+
     // GET /proxy/models — catalog of available Gemini models + rate limits
     if (request.method === "GET" && path === "/proxy/models") {
       return handleModels(cors);
@@ -872,7 +962,7 @@ export default {
 
     // POST /proxy/**  → main proxy
     if (request.method === "POST") {
-      return handleProxy(request, env, keyCount, cors);
+      return handleProxy(request, env, keyCount, cors, ctx);
     }
 
     return new Response(JSON.stringify({ error: "Not found" }), {

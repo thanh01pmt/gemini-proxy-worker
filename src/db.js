@@ -80,3 +80,57 @@ export async function getRecentAlerts(db, hours = 24) {
     return [];
   }
 }
+
+/**
+ * Lưu API call info vào D1
+ */
+export async function saveApiCall(db, { modelId, inputTokens, outputTokens, cachedTokens, statusCode, keyIndex }) {
+  if (!db) return;
+  try {
+    await db.prepare(`
+      INSERT INTO api_calls (model_id, input_tokens, output_tokens, cached_tokens, status_code, key_index)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      modelId,
+      inputTokens || 0,
+      outputTokens || 0,
+      cachedTokens || 0,
+      statusCode || 0,
+      keyIndex ?? null
+    ).run();
+  } catch (e) {
+    console.error("D1 saveApiCall failed:", e.message);
+  }
+}
+
+/**
+ * Lấy danh sách API calls theo time range hoặc giới hạn số lượng
+ */
+export async function getRecentApiCalls(db, { limit = 100, startTime = null, endTime = null } = {}) {
+  if (!db) return [];
+  try {
+    let query = `
+      SELECT id, timestamp, model_id, input_tokens, output_tokens, cached_tokens, status_code, key_index
+      FROM api_calls
+    `;
+    const params = [];
+    if (startTime && endTime) {
+      query += ` WHERE datetime(timestamp) BETWEEN datetime(?) AND datetime(?)`;
+      params.push(startTime, endTime);
+    } else if (startTime) {
+      query += ` WHERE datetime(timestamp) >= datetime(?)`;
+      params.push(startTime);
+    } else if (endTime) {
+      query += ` WHERE datetime(timestamp) <= datetime(?)`;
+      params.push(endTime);
+    }
+    query += ` ORDER BY timestamp DESC LIMIT ?`;
+    params.push(limit);
+
+    const result = await db.prepare(query).bind(...params).all();
+    return result.results || [];
+  } catch (e) {
+    console.error("D1 getRecentApiCalls failed:", e.message);
+    return [];
+  }
+}

@@ -25,3 +25,18 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE INDEX IF NOT EXISTS idx_reports_date ON daily_reports(report_date);
 CREATE INDEX IF NOT EXISTS idx_alerts_type  ON alerts(alert_type);
 CREATE INDEX IF NOT EXISTS idx_alerts_time  ON alerts(created_at);
+
+-- Lịch sử các cuộc gọi API để đo cost chính xác
+CREATE TABLE IF NOT EXISTS api_calls (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp     TEXT    DEFAULT (datetime('now')), -- UTC ISO-8601
+  model_id      TEXT    NOT NULL,
+  input_tokens  INTEGER DEFAULT 0,
+  output_tokens INTEGER DEFAULT 0,
+  cached_tokens INTEGER DEFAULT 0,
+  status_code   INTEGER DEFAULT 0,
+  key_index     INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_calls_time ON api_calls(timestamp);
+CREATE INDEX IF NOT EXISTS idx_api_calls_model ON api_calls(model_id);
