@@ -1,0 +1,30 @@
+### Kiểm thử Google Search Grounding qua Gemini Proxy (Local / Production)
+
+# Chọn URL của môi trường cần kiểm thử:
+@baseUrl = https://gemini-proxy.makexyzfun.workers.dev
+# @baseUrl = http://localhost:8787
+
+@proxySecret = cloudflare-gemini-proxy-Secret@123
+@model = gemini-2.5-flash
+
+POST {{baseUrl}}/proxy/v1beta/models/{{model}}:generateContent
+Content-Type: application/json
+X-Proxy-Secret: {{proxySecret}}
+
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "Thời tiết Hà Nội hôm nay thế nào? Hãy cập nhật thông tin mới nhất và cho biết nguồn từ trang web nào."
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "google_search": {}
+    }
+  ]
+}
